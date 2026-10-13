@@ -16,6 +16,7 @@ import '../../domain/office/ai_provider.dart';
 import '../../infrastructure/codegen/provider_router_gateway.dart';
 import '../../infrastructure/ai/local_model_downloader.dart';
 import '../../infrastructure/ai/local_model_service.dart';
+import '../../infrastructure/codegen/openai_compatible_transport.dart';
 import 'local_model_manager_card.dart';
 
 const Color _bg = Color(0xFF05080D);
@@ -347,42 +348,174 @@ class _AresSettingsCenterState extends State<AresSettingsCenter> {
     final limit = TextEditingController(text: p.dailyLimit > 0 ? '${p.dailyLimit}' : '');
     var enabled = p.enabled;
     var deprecated = p.deprecated;
+    var models = <String>[];
+    var modelsBusy = false;
+    var modelsError = '';
+    String? selectedModel = p.model.isEmpty ? null : p.model;
+
     final saved = await showDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setLocal) => AlertDialog(
-          title: Text(p.name),
-          content: SizedBox(
-            width: 520,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('${providerCategoryLabel(p.category)} • ${p.vendor}', style: const TextStyle(color: Colors.white70)),
-                  if (p.siteUrl.isNotEmpty) SelectableText('Anahtar/Site: ${p.siteUrl}', style: const TextStyle(color: _cyan)),
-                  if (!p.chat) const Text('Araç AI: sohbet için çağrılmaz, yalnızca katalogda tutulur.', style: TextStyle(color: Colors.white54)),
-                  if (p.category == ProviderCategory.paid)
-                    const Text('Ücretli: kullanım için Onaylar bölümünde onayınız gerekir.', style: TextStyle(color: Color(0xFFFFB27A))),
-                  const SizedBox(height: 8),
-                  TextField(controller: baseUrl, decoration: const InputDecoration(labelText: 'Adres (Base URL)')),
-                  TextField(controller: model, decoration: const InputDecoration(labelText: 'Model adı')),
-                  if (p.needsKey)
-                    TextField(controller: key, obscureText: true, autocorrect: false, enableSuggestions: false, decoration: const InputDecoration(labelText: 'API anahtarı')),
-                  TextField(controller: limit, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Günlük istek sınırı (0 = sınırsız)')),
-                  SwitchListTile(contentPadding: EdgeInsets.zero, title: const Text('Etkin (ekip bunu kullanabilir)'), value: enabled, onChanged: (v) => setLocal(() => enabled = v)),
-                  SwitchListTile(contentPadding: EdgeInsets.zero, title: const Text('Kullanımdan kalktı olarak işaretle'), value: deprecated, onChanged: (v) => setLocal(() => deprecated = v)),
-                ],
+        builder: (ctx, setLocal) {
+          Future<void> fetchModels() async {
+            final url = baseUrl.text.trim();
+            if (url.isEmpty) {
+              setLocal(() {
+                modelsError = 'Önce Base URL girin.';
+                models = <String>[];
+              });
+              return;
+            }
+            setLocal(() {
+              modelsBusy = true;
+              modelsError = '';
+            });
+            try {
+              final list = await RemoteModelCatalog().listModels(
+                baseUrl: url,
+                apiKey: key.text,
+              );
+              if (!ctx.mounted) return;
+              setLocal(() {
+                models = list;
+                modelsBusy = false;
+                if (list.isEmpty) {
+                  modelsError = 'Sağlayıcı model listesi döndürmedi. Model adını elle yazabilirsiniz.';
+                } else if (selectedModel != null && !list.contains(selectedModel)) {
+                  // Keep current model text even if not in list
+                }
+              });
+            } catch (e) {
+              if (!ctx.mounted) return;
+              setLocal(() {
+                modelsBusy = false;
+                modelsError = 'Liste alınamadı: $e';
+                models = <String>[];
+              });
+            }
+          }
+
+          return AlertDialog(
+            title: Text(p.name),
+            content: SizedBox(
+              width: 560,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('${providerCategoryLabel(p.category)} · ${p.vendor}', style: const TextStyle(color: Colors.white70)),
+                    if (p.siteUrl.isNotEmpty)
+                      SelectableText('Anahtar/Site: ${p.siteUrl}', style: const TextStyle(color: _cyan)),
+                    if (!p.chat)
+                      const Text('Araç AI: sohbet için çağrılmaz, yalnızca katalogda tutulur.', style: TextStyle(color: Colors.white54)),
+                    if (p.category == ProviderCategory.paid)
+                      const Text('Ücretli: kullanım için Onaylar bölümünde onayınız gerekir.', style: TextStyle(color: Color(0xFFFFB27A))),
+                    const SizedBox(height: 8),
+                    TextField(controller: baseUrl, decoration: const InputDecoration(labelText: 'Adres (Base URL)')),
+                    const SizedBox(height: 8),
+                    // API anahtarı — model listesi bunun hemen altında / model seçimi üstte
+                    if (p.needsKey || p.category != ProviderCategory.local)
+                      TextField(
+                        controller: key,
+                        obscureText: true,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        decoration: const InputDecoration(labelText: 'API anahtarı'),
+                      ),
+                    const SizedBox(height: 10),
+                    // Model keşfi satırı
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            models.isEmpty
+                                ? 'Bu API anahtarıyla açılan modeller'
+                                : 'Modeller (${models.length}) — CEO / kullanıcı seçebilir',
+                            style: const TextStyle(color: _cyan, fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                        FilledButton.tonal(
+                          onPressed: modelsBusy ? null : fetchModels,
+                          child: modelsBusy
+                              ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                              : const Text('Modelleri getir'),
+                        ),
+                      ],
+                    ),
+                    if (modelsError.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(modelsError, style: const TextStyle(color: Color(0xFFFFB27A), fontSize: 12)),
+                    ],
+                    if (models.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        constraints: const BoxConstraints(maxHeight: 180),
+                        decoration: BoxDecoration(
+                          color: _panel,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: _line),
+                        ),
+                        child: ListView.builder(
+                          shrinkWrap: true,
+                          itemCount: models.length,
+                          itemBuilder: (_, i) {
+                            final id = models[i];
+                            final selected = (selectedModel ?? model.text.trim()) == id;
+                            return ListTile(
+                              dense: true,
+                              selected: selected,
+                              title: Text(id, style: const TextStyle(color: Colors.white, fontSize: 13)),
+                              trailing: selected ? const Icon(Icons.check, color: _cyan, size: 18) : null,
+                              onTap: () {
+                                setLocal(() {
+                                  selectedModel = id;
+                                  model.text = id;
+                                });
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: model,
+                      decoration: const InputDecoration(
+                        labelText: 'Seçili model adı',
+                        helperText: 'Listeden seçin veya elle yazın',
+                      ),
+                    ),
+                    TextField(
+                      controller: limit,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: 'Günlük istek sınırı (0 = sınırsız)'),
+                    ),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Etkin (ekip bunu kullanabilir)'),
+                      value: enabled,
+                      onChanged: (v) => setLocal(() => enabled = v),
+                    ),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Kullanımdan kalktı olarak işaretle'),
+                      value: deprecated,
+                      onChanged: (v) => setLocal(() => deprecated = v),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Vazgeç')),
-            FilledButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Kaydet')),
-          ],
-        ),
+            actions: [
+              TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Vazgeç')),
+              FilledButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Kaydet')),
+            ],
+          );
+        },
       ),
     );
+
     final updated = p.copyWith(
       baseUrl: baseUrl.text.trim(),
       model: model.text.trim(),
@@ -405,8 +538,11 @@ class _AresSettingsCenterState extends State<AresSettingsCenter> {
         refId: updated.id,
       );
       if (mounted) _notice('${updated.name} ücretli: Onaylar bölümünde onay verene kadar kullanılmaz.');
+    } else if (mounted) {
+      _notice('${updated.name} kaydedildi. Model: ${updated.model.isEmpty ? "(yok)" : updated.model}');
     }
   }
+
 
   Future<void> _addCustom() async {
     final name = TextEditingController();
